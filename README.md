@@ -13,7 +13,7 @@ Un cop ho teniu fet, haureu de tenir la carpeta amb tot el codi del repo al vost
 
 ## Comandes per iniciar (Es pot fer desde la terminal del Visual
 
-1. npm install
+1. npm install (Només el primer cop)
 2. npm run dev
 
 Aquesta última comanda us mostrarà unes línies per pantalla, amb un link `http://localhost:[VALOR]`. Això us obrirà la web de forma local (només vosaltres podeu veure la web des de aquell link). **Si feu qualsevol canvi al codi ho veureu directament des de la web.**
