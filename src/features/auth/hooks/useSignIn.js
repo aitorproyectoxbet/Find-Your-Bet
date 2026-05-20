@@ -47,7 +47,7 @@ export function useSignIn({ onLogin }) {
     setError('')
     setLoading(true)
     const { error: resetError } = await supabase.auth.resetPasswordForEmail(email, {
-      redirectTo: 'http://localhost:5173'
+      redirectTo: window.location.origin
     })
     setLoading(false)
     if (resetError) { setError(resetError.message); return }
