@@ -78,7 +78,7 @@ export default function GoogleOnboarding({ user, onComplete }) {
             )}
             <div className="auth-card-logo">Casi listo</div>
             <div className="auth-subtitle">
-              Hola{user.name ? `, ${user.name.split(' ')[0]}` : ''}. Solo necesitamos un par de datos más para completar tu cuenta.
+              Solo necesitamos un par de datos más para completar tu cuenta.
             </div>
           </motion.div>
 

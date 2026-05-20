@@ -77,7 +77,6 @@ export function useDMs(currentUserId) {
         ...conv,
         otherId,
         otherUsername: profile?.username || otherId.slice(0, 6),
-        otherName: profile?.name || '',
         otherAvatarUrl: profile?.avatar_url || null,
         lastMessage: lastMsg?.content || '',
         lastMessageAt: lastMsg?.created_at || conv.created_at,
