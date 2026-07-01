@@ -26,8 +26,8 @@ const FEATURES = [
   { title: 'Ranking transparente',   desc: 'Ordenado por ROI real, racha y volumen. Los mejores arriba, siempre.' },
   { title: 'Canales VIP',            desc: 'Suscríbete a los canales privados de los tipsters que más te interesan y recibe sus picks antes que nadie.' },
   { title: 'Canales en directo',     desc: 'Cada tipster tiene su canal. Picks, análisis y debate en tiempo real con toda la comunidad.' },
-  { title: 'Tus estadísticas',       desc: 'Lleva el control de tus apuestas, ROI y evolución. Compara tu rendimiento con el ranking.' },
-  { title: '12 deportes',            desc: 'Fútbol, baloncesto, tenis, eSports y más. Encuentra al tipster experto en lo que apuestas.' },
+  { title: 'Tus estadísticas',       desc: 'Lleva el control de tus picks, ROI y evolución. Compara tu rendimiento con el ranking.' },
+  { title: '12 deportes',            desc: 'Fútbol, baloncesto, tenis, eSports y más. Encuentra al tipster experto en tu deporte.' },
 ]
 
 const TIPSTERS = [
@@ -280,7 +280,7 @@ function Hero({ user }) {
       <TipsterRain />
       <motion.h1 variants={fadeUp} initial="hidden" animate="visible" custom={0}>
         La red social<br />
-        <em>de las apuestas deportivas</em>
+        <em>de los pronósticos deportivos</em>
       </motion.h1>
 
       <motion.p className="hero-sub" variants={fadeUp} initial="hidden" animate="visible" custom={1}>
@@ -388,7 +388,7 @@ export default function Landing({ navigate, user }) {
       <section className="features-section" id="section-features">
         <div className="features-inner">
           <motion.div variants={fadeUp} initial="hidden" whileInView="visible" viewport={{ once: true }}>
-            <div className="section-title">Todo en un solo sitio<br />para apostar con cabeza</div>
+            <div className="section-title">Todo en un solo sitio<br />para pronosticar con cabeza</div>
           </motion.div>
 
           <motion.div
@@ -484,7 +484,7 @@ export default function Landing({ navigate, user }) {
         <div className="cta-inner">
           <motion.div className="cta-content" variants={fadeUp} initial="hidden" whileInView="visible" viewport={{ once: true }}>
             <h2>Únete a la comunidad</h2>
-            <p>Gratis, sin tarjeta. Accede al ranking completo, sigue canales de tipsters verificados y empieza a apostar con datos reales.</p>
+            <p>Gratis, sin tarjeta. Accede al ranking completo, sigue canales de tipsters verificados y empieza a pronosticar con datos reales.</p>
             <div className="cta-btns">
               <Button onClick={() => navigate('register')}>Crear cuenta gratis</Button>
               <Button variant="ghost" onClick={() => navigate('login')}>Iniciar sesión</Button>
