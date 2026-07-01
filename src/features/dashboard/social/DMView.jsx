@@ -5,6 +5,11 @@ import { StickerPicker } from '../StickerPicker'
 import { VoicePlayer, VoiceRecordButton } from '../VoiceMessage'
 import Username from '../../../components/ui/Username'
 import { usePolling } from '../../../hooks/usePolling'
+import { MUTE_DURATIONS } from '../../../hooks/useMutes'
+import { useProfileNav } from '../../../contexts/ProfileNavContext'
+import { useMentionInput } from '../../../hooks/useMentionInput'
+import { clampLines, LINE_LIMIT } from '../../../lib/textLimits'
+import MentionText from '../../../components/ui/MentionText'
 import ForwardModal from './ForwardModal'
 import ForwardedChannelModal from '../canales/ForwardedChannelModal'
 import PinDurationModal from '../canales/PinDurationModal'
@@ -75,7 +80,7 @@ function isSingleEmoji(content) {
   }
 }
 
-function renderContent(content, isOwn, onViewProfile) {
+function renderContent(content, isOwn, onViewProfile, onMention) {
   if (!content) return null
   if (content.startsWith('[IMG_MSG]:')) {
     try {
@@ -164,7 +169,7 @@ function renderContent(content, isOwn, onViewProfile) {
       </motion.span>
     )
   }
-  return content
+  return <MentionText text={content} onMention={onMention} color={isOwn ? '#010906' : 'var(--color-primary)'} />
 }
 
 // Divisor "Nuevos mensajes" per als DMs (id fix per fer-hi scroll directe).
@@ -178,10 +183,18 @@ function NewMessagesDivider() {
   )
 }
 
-export default function DMView({ conversation, currentUser, onBack, onSend, onFetchMessages, onMarkRead, onUnreadChange, onBlock, onReport, onViewProfile, onAccept, onNavigateToChannel, compact = false }) {
+export default function DMView({ conversation, currentUser, onBack, onSend, onFetchMessages, onMarkRead, onUnreadChange, onBlock, onReport, onViewProfile, onAccept, onNavigateToChannel, isPinned, onTogglePin, isMutedConv, onMuteConv, onUnmuteConv, onDeleteConv, compact = false }) {
   const [messages, setMessages] = useState([])
   const [text, setText] = useState('')
   const [loading, setLoading] = useState(true)
+  const msgInputRef = useRef(null)
+  const mention = useMentionInput({ currentUser, text, setText, inputRef: msgInputRef })
+  // Clic en una menció @usuario → obre el perfil emergent (modal global), igual a tot arreu.
+  const openProfileGlobal = useProfileNav()
+  const handleMention = async (username) => {
+    const { data } = await supabase.from('profiles').select('id').eq('username', username).maybeSingle()
+    if (data?.id) openProfileGlobal(data.id)
+  }
   // Tracking de no llegits per scroll (mateix model que ChatView):
   const [firstUnreadId, setFirstUnreadId] = useState(null) // snapshot per al divisor
   const [markedIds, setMarkedIds] = useState(() => new Set()) // missatges marcats aquesta sessió
@@ -189,8 +202,8 @@ export default function DMView({ conversation, currentUser, onBack, onSend, onFe
   const markedRef = useRef(new Set())
   const observerRef = useRef(null)
   const [showMenu, setShowMenu] = useState(false)
+  const [showMuteSub, setShowMuteSub] = useState(false)
   const [showStickers, setShowStickers] = useState(false)
-  const [muted, setMuted] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [uploadError, setUploadError] = useState('')
   const [pastedImage, setPastedImage] = useState(null)
@@ -472,6 +485,7 @@ export default function DMView({ conversation, currentUser, onBack, onSend, onFe
   }
 
   const handleKey = (e) => {
+    if (mention.handleKeyDown(e)) return // el dropdown de mencions consumeix la tecla
     if (e.key === 'Escape') { setReplyTo(null); setEditingMsg(null); setText(''); return }
     if (e.key !== 'Enter') return
     e.preventDefault()
@@ -485,10 +499,19 @@ export default function DMView({ conversation, currentUser, onBack, onSend, onFe
     e.target.value = ''
   }
 
+  const closeMenu = () => { setShowMenu(false); setShowMuteSub(false) }
+
+  // Mateixes accions que el menú de 3 punts de la llista de converses.
   const menuItems = [
-    { icon: muted ? '🔔' : '🔕', label: muted ? 'Activar notificaciones' : 'Silenciar', action: () => { setMuted(!muted); setShowMenu(false) } },
-    { icon: '🚩', label: 'Reportar', action: () => { onReport?.(conversation.id); setShowMenu(false) } },
-    { icon: '🚫', label: 'Bloquear', action: () => { onBlock?.(conversation.id); setShowMenu(false) }, danger: true },
+    { icon: isPinned ? '📍' : '📌', label: isPinned ? 'Desanclar' : 'Anclar', action: () => { onTogglePin?.(); closeMenu() } },
+    {
+      icon: isMutedConv ? '🔔' : '🔕', label: isMutedConv ? 'Activar notificaciones' : 'Silenciar',
+      // Si està silenciat, reactiva directament; si no, obre el submenú de durades.
+      action: () => { if (isMutedConv) { onUnmuteConv?.(); closeMenu() } else { setShowMuteSub(true) } },
+    },
+    { icon: '🗑️', label: 'Eliminar chat', action: () => { onDeleteConv?.(); closeMenu() }, danger: true },
+    { icon: '🚫', label: 'Bloquear', action: () => { onBlock?.(); closeMenu() }, danger: true },
+    { icon: '🚩', label: 'Reportar', action: () => { onReport?.(); closeMenu() } },
   ]
 
   const isPending = !conversation.otherAccepted && conversation.user1_id === currentUser.id
@@ -524,15 +547,25 @@ export default function DMView({ conversation, currentUser, onBack, onSend, onFe
           </button>
           {showMenu && (
             <>
-              <div onClick={() => setShowMenu(false)} style={{ position: 'fixed', inset: 0, zIndex: 9 }} />
+              <div onClick={closeMenu} style={{ position: 'fixed', inset: 0, zIndex: 9 }} />
               <motion.div initial={{ opacity: 0, y: -8, scale: 0.95 }} animate={{ opacity: 1, y: 0, scale: 1 }}
                 style={{ position: 'absolute', top: '36px', right: 0, background: 'var(--color-bg)', border: '0.5px solid var(--color-border)', borderRadius: 'var(--radius-lg)', boxShadow: 'var(--shadow-md)', zIndex: 10, minWidth: '180px', overflow: 'hidden' }}>
-                {menuItems.map((item, i) => (
-                  <button key={i} onClick={item.action}
-                    style={{ display: 'flex', alignItems: 'center', gap: '10px', width: '100%', padding: '12px 16px', background: 'none', border: 'none', cursor: 'pointer', fontSize: '14px', color: item.danger ? 'var(--color-error)' : 'var(--color-text)', textAlign: 'left', borderBottom: i < menuItems.length - 1 ? '0.5px solid var(--color-border)' : 'none', fontFamily: 'var(--font-sans)' }}>
-                    <span>{item.icon}</span><span>{item.label}</span>
-                  </button>
-                ))}
+                {showMuteSub ? (
+                  // Submenú de durades de silenci (igual que a la llista).
+                  MUTE_DURATIONS.map((d, i) => (
+                    <button key={i} onClick={() => { onMuteConv?.(d.ms); closeMenu() }}
+                      style={{ display: 'flex', alignItems: 'center', gap: '10px', width: '100%', padding: '12px 16px', background: 'none', border: 'none', cursor: 'pointer', fontSize: '14px', color: 'var(--color-text)', textAlign: 'left', borderBottom: i < MUTE_DURATIONS.length - 1 ? '0.5px solid var(--color-border)' : 'none', fontFamily: 'var(--font-sans)' }}>
+                      {d.label}
+                    </button>
+                  ))
+                ) : (
+                  menuItems.map((item, i) => (
+                    <button key={i} onClick={item.action}
+                      style={{ display: 'flex', alignItems: 'center', gap: '10px', width: '100%', padding: '12px 16px', background: 'none', border: 'none', cursor: 'pointer', fontSize: '14px', color: item.danger ? 'var(--color-error)' : 'var(--color-text)', textAlign: 'left', borderBottom: i < menuItems.length - 1 ? '0.5px solid var(--color-border)' : 'none', fontFamily: 'var(--font-sans)' }}>
+                      <span>{item.icon}</span><span>{item.label}</span>
+                    </button>
+                  ))
+                )}
               </motion.div>
             </>
           )}
@@ -655,7 +688,7 @@ export default function DMView({ conversation, currentUser, onBack, onSend, onFe
                           {replyPreview}
                         </div>
                       )}
-                      {renderContent(displayContent, isOwn, onViewProfile)}
+                      {renderContent(displayContent, isOwn, onViewProfile, handleMention)}
                       {edited && !isSpecialNobubble && !isImage && (
                         <span style={{ fontSize: '10px', opacity: 0.55, fontStyle: 'italic', marginLeft: '4px' }}>(editado)</span>
                       )}
@@ -702,7 +735,7 @@ export default function DMView({ conversation, currentUser, onBack, onSend, onFe
             {conversation.otherUsername} quiere enviarte un mensaje
           </div>
           <div style={{ display: 'flex', gap: '8px', justifyContent: 'center' }}>
-            <button onClick={() => onBlock?.(conversation.id)}
+            <button onClick={() => onDeleteConv?.()}
               style={{ padding: '8px 16px', borderRadius: 'var(--radius-md)', border: '0.5px solid var(--color-error-border)', background: 'var(--color-error-light)', color: 'var(--color-error)', cursor: 'pointer', fontSize: '13px', fontWeight: 600, fontFamily: 'var(--font-sans)' }}>
               Rechazar
             </button>
@@ -839,17 +872,20 @@ export default function DMView({ conversation, currentUser, onBack, onSend, onFe
               {uploading ? '⏳' : '📎'}
             </button>
             <VoiceRecordButton userId={currentUser.id} onSend={async content => { await onSend(conversation.id, content); await refreshMessages() }} />
-            <textarea value={text} onChange={e => setText(e.target.value)} onKeyDown={handleKey}
-              placeholder="Envía un mensaje" rows={2} maxLength={2000}
-              onPaste={e => {
-                const item = Array.from(e.clipboardData?.items || []).find(i => i.type.startsWith('image/'))
-                if (item) {
-                  e.preventDefault()
-                  const file = item.getAsFile()
-                  if (file) setPastedImage({ file, previewUrl: URL.createObjectURL(file) })
-                }
-              }}
-              style={{ flex: 1, background: 'var(--color-bg)', border: '0.5px solid var(--color-border)', color: 'var(--color-text)', fontFamily: 'var(--font-sans)', fontSize: '14px', padding: '12px 14px', borderRadius: 'var(--radius-md)', outline: 'none', resize: 'none', boxSizing: 'border-box' }} />
+            <div style={{ position: 'relative', flex: 1, minWidth: 0 }}>
+              {mention.dropdown}
+              <textarea ref={msgInputRef} value={text} onChange={e => mention.handleChange(clampLines(e.target.value, LINE_LIMIT.MESSAGE), e.target.selectionStart)} onKeyDown={handleKey}
+                placeholder="Envía un mensaje" rows={2} maxLength={2000}
+                onPaste={e => {
+                  const item = Array.from(e.clipboardData?.items || []).find(i => i.type.startsWith('image/'))
+                  if (item) {
+                    e.preventDefault()
+                    const file = item.getAsFile()
+                    if (file) setPastedImage({ file, previewUrl: URL.createObjectURL(file) })
+                  }
+                }}
+                style={{ width: '100%', background: 'var(--color-bg)', border: '0.5px solid var(--color-border)', color: 'var(--color-text)', fontFamily: 'var(--font-sans)', fontSize: '14px', padding: '12px 14px', borderRadius: 'var(--radius-md)', outline: 'none', resize: 'none', boxSizing: 'border-box' }} />
+            </div>
             <div style={{ position: 'relative', flexShrink: 0 }}>
               <button onClick={() => setShowStickers(v => !v)}
                 style={{ background: showStickers ? 'var(--color-primary-light)' : 'var(--color-bg)', border: '0.5px solid var(--color-border)', borderRadius: 'var(--radius-md)', padding: '11px 14px', cursor: 'pointer', fontSize: '16px', color: showStickers ? 'var(--color-primary)' : 'var(--color-text-muted)' }}>

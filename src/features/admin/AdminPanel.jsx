@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react'
 import { motion } from 'framer-motion'
 import { supabase } from '../../lib/supabase'
+import { ADMIN_USER_IDS } from '../../lib/adminUsers'
+import { clampLines, stripEmojis, LINE_LIMIT } from '../../lib/textLimits'
 
 // Emails amb accés al panell d'administració.
 // Afegir més si cal.
@@ -159,7 +161,7 @@ function SuggestionRow({ suggestion, onUpdate }) {
             </div>
             <div style={{ flex: 2, minWidth: '240px' }}>
               <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.7px', marginBottom: '6px' }}>Respuesta (opcional)</div>
-              <textarea value={response} onChange={e => setResponse(e.target.value)} rows={3}
+              <textarea value={response} onChange={e => setResponse(clampLines(stripEmojis(e.target.value), LINE_LIMIT.FORM))} rows={3}
                 placeholder="Escribe una respuesta visible para el usuario..."
                 style={{ width: '100%', background: 'var(--color-bg-soft)', border: '0.5px solid var(--color-border)', color: 'var(--color-text)', fontFamily: 'var(--font-sans)', fontSize: '13px', padding: '9px 12px', borderRadius: 'var(--radius-md)', outline: 'none', resize: 'vertical', boxSizing: 'border-box' }} />
             </div>
@@ -320,7 +322,7 @@ function TicketRow({ ticket, onUpdate }) {
             </div>
             <div style={{ flex: 2, minWidth: '240px' }}>
               <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.7px', marginBottom: '6px' }}>Respuesta (opcional)</div>
-              <textarea value={response} onChange={e => setResponse(e.target.value)} rows={3}
+              <textarea value={response} onChange={e => setResponse(clampLines(stripEmojis(e.target.value), LINE_LIMIT.FORM))} rows={3}
                 placeholder="Escribe una respuesta visible para el usuario..."
                 style={{ width: '100%', background: 'var(--color-bg-soft)', border: '0.5px solid var(--color-border)', color: 'var(--color-text)', fontFamily: 'var(--font-sans)', fontSize: '13px', padding: '9px 12px', borderRadius: 'var(--radius-md)', outline: 'none', resize: 'vertical', boxSizing: 'border-box' }} />
             </div>
@@ -472,9 +474,38 @@ function VerificadosTab() {
   )
 }
 
+// Agrupa reports per usuari reportat. Dedupa per reporter (només compta el PRIMER
+// report de cada persona) i ordena pels qui tenen més denúncies — els més prioritaris
+// surten primer. Cada grup és plegable: en obrir-lo es veuen els motius de cada reporter.
+function groupReports(reports) {
+  const groups = new Map()
+  // Ascendent perquè, en dedupar, conservem el report MÉS ANTIC de cada reporter.
+  const ordered = [...reports].sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
+  for (const r of ordered) {
+    const key = r.reported_id || r.reported?.username || r.id
+    if (!groups.has(key)) {
+      groups.set(key, { key, reportedUsername: r.reported?.username || '?', byReporter: new Map(), all: [] })
+    }
+    const g = groups.get(key)
+    g.all.push(r)
+    // Només el primer report de cada reporter compta (dedup).
+    if (!g.byReporter.has(r.reporter_id)) g.byReporter.set(r.reporter_id, r)
+  }
+  return [...groups.values()]
+    .map(g => {
+      const unique = [...g.byReporter.values()]
+      const hasPending = g.all.some(r => r.status === 'pending')
+      const lastAt = g.all.reduce((max, r) => Math.max(max, new Date(r.created_at).getTime()), 0)
+      return { ...g, unique, count: unique.length, hasPending, lastAt }
+    })
+    // Prioritat: més denunciants primer; a igualtat, el més recent a dalt.
+    .sort((a, b) => (b.count - a.count) || (b.lastAt - a.lastAt))
+}
+
 function UserReportsTab() {
   const [reports, setReports] = useState([])
   const [loading, setLoading] = useState(true)
+  const [expanded, setExpanded] = useState(() => new Set())
 
   const fetchReports = async () => {
     setLoading(true)
@@ -482,9 +513,9 @@ function UserReportsTab() {
     try {
       const { data } = await supabase
         .from('user_reports')
-        .select('id, reason, details, status, created_at, reporter:profiles!reporter_id(username), reported:profiles!reported_id(username)')
+        .select('id, reporter_id, reported_id, reason, details, status, created_at, reporter:profiles!reporter_id(username), reported:profiles!reported_id(username)')
         .order('created_at', { ascending: false })
-        .limit(100)
+        .limit(200)
       setReports(data || [])
     } catch {
       setReports([])
@@ -496,13 +527,18 @@ function UserReportsTab() {
 
   useEffect(() => { fetchReports() }, [])
 
-  const markReviewed = async (id) => {
-    await supabase.from('user_reports').update({ status: 'reviewed' }).eq('id', id)
-    setReports(prev => prev.map(r => r.id === id ? { ...r, status: 'reviewed' } : r))
+  // Marca com revisats TOTS els reports d'un usuari reportat alhora.
+  const markGroupReviewed = async (group) => {
+    const ids = group.all.map(r => r.id)
+    await supabase.from('user_reports').update({ status: 'reviewed' }).in('id', ids)
+    setReports(prev => prev.map(r => ids.includes(r.id) ? { ...r, status: 'reviewed' } : r))
   }
 
-  const pending = reports.filter(r => r.status === 'pending')
-  const reviewed = reports.filter(r => r.status === 'reviewed')
+  const toggle = (key) => setExpanded(prev => {
+    const n = new Set(prev)
+    n.has(key) ? n.delete(key) : n.add(key)
+    return n
+  })
 
   if (loading) return <div style={{ textAlign: 'center', padding: '40px', color: 'var(--color-text-muted)' }}>⏳ Cargando...</div>
 
@@ -513,46 +549,288 @@ function UserReportsTab() {
     </div>
   )
 
-  const ReportRow = ({ r }) => (
-    <div style={{ background: 'var(--color-bg)', border: `0.5px solid ${r.status === 'pending' ? 'var(--color-warning, #f59e0b)' : 'var(--color-border)'}`, borderLeft: `3px solid ${r.status === 'pending' ? 'var(--color-warning, #f59e0b)' : 'var(--color-border)'}`, borderRadius: 'var(--radius-lg)', padding: '14px 16px', marginBottom: '8px', opacity: r.status === 'reviewed' ? 0.6 : 1 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px', flexWrap: 'wrap' }}>
-        <div style={{ flex: 1 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px', flexWrap: 'wrap' }}>
-            <span style={{ fontSize: '13px', color: 'var(--color-text-muted)' }}>
-              <strong style={{ color: 'var(--color-text)' }}>{r.reporter?.username || '?'}</strong>
-              {' reporta a '}
-              <strong style={{ color: 'var(--color-error)' }}>{r.reported?.username || '?'}</strong>
-            </span>
-            <span style={{ fontSize: '11px', color: 'var(--color-text-muted)', background: 'var(--color-bg-soft)', padding: '2px 8px', borderRadius: '999px' }}>
-              {new Date(r.created_at).toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' })}
+  const groups = groupReports(reports)
+  const pendingGroups = groups.filter(g => g.hasPending)
+  const reviewedGroups = groups.filter(g => !g.hasPending)
+
+  const GroupCard = ({ g }) => {
+    const isOpen = expanded.has(g.key)
+    return (
+      <div style={{ background: 'var(--color-bg)', border: `0.5px solid ${g.hasPending ? 'var(--color-warning, #f59e0b)' : 'var(--color-border)'}`, borderLeft: `3px solid ${g.hasPending ? 'var(--color-warning, #f59e0b)' : 'var(--color-border)'}`, borderRadius: 'var(--radius-lg)', marginBottom: '8px', opacity: g.hasPending ? 1 : 0.65, overflow: 'hidden' }}>
+        {/* Capçalera plegable: usuari reportat + nombre de denunciants */}
+        <div onClick={() => toggle(g.key)}
+          style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', padding: '14px 16px', cursor: 'pointer' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+            <span style={{ fontSize: '12px', color: 'var(--color-text-muted)', transform: isOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s' }}>▶</span>
+            <strong style={{ fontSize: '14px', color: 'var(--color-error)' }}>{g.reportedUsername}</strong>
+            <span style={{ fontSize: '11px', fontWeight: 700, color: '#fff', background: g.count > 1 ? 'var(--color-error)' : 'var(--color-text-muted)', padding: '2px 9px', borderRadius: '999px' }}>
+              {g.count} {g.count === 1 ? 'reporte' : 'personas'}
             </span>
           </div>
-          <div style={{ fontSize: '13px', fontWeight: 600, marginBottom: r.details ? '4px' : 0 }}>{r.reason}</div>
-          {r.details && <div style={{ fontSize: '12px', color: 'var(--color-text-muted)', fontStyle: 'italic' }}>{r.details}</div>}
+          {g.hasPending ? (
+            <button onClick={(e) => { e.stopPropagation(); markGroupReviewed(g) }}
+              style={{ padding: '5px 12px', border: '0.5px solid var(--color-border)', borderRadius: 'var(--radius-md)', background: 'var(--color-bg-soft)', color: 'var(--color-text-muted)', cursor: 'pointer', fontSize: '12px', fontFamily: 'var(--font-sans)', flexShrink: 0 }}>
+              ✓ Marcar revisado
+            </button>
+          ) : (
+            <span style={{ fontSize: '12px', color: 'var(--color-primary)', fontWeight: 600, flexShrink: 0 }}>✓ Revisado</span>
+          )}
         </div>
-        {r.status === 'pending' ? (
-          <button onClick={() => markReviewed(r.id)}
-            style={{ padding: '5px 12px', border: '0.5px solid var(--color-border)', borderRadius: 'var(--radius-md)', background: 'var(--color-bg-soft)', color: 'var(--color-text-muted)', cursor: 'pointer', fontSize: '12px', fontFamily: 'var(--font-sans)', flexShrink: 0 }}>
-            ✓ Marcar revisado
-          </button>
-        ) : (
-          <span style={{ fontSize: '12px', color: 'var(--color-primary)', fontWeight: 600 }}>✓ Revisado</span>
+        {/* Detall: motiu de cada reporter (dedupat) */}
+        {isOpen && (
+          <div style={{ borderTop: '0.5px solid var(--color-border)', padding: '8px 16px 12px' }}>
+            {g.unique.map(r => (
+              <div key={r.id} style={{ padding: '10px 0', borderBottom: '0.5px solid var(--color-border)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px', flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: '12px', color: 'var(--color-text-muted)' }}>
+                    Reportado por <strong style={{ color: 'var(--color-text)' }}>{r.reporter?.username || '?'}</strong>
+                  </span>
+                  <span style={{ fontSize: '11px', color: 'var(--color-text-muted)', background: 'var(--color-bg-soft)', padding: '2px 8px', borderRadius: '999px' }}>
+                    {new Date(r.created_at).toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                  </span>
+                </div>
+                <div style={{ fontSize: '13px', fontWeight: 600, marginBottom: r.details ? '4px' : 0 }}>{r.reason}</div>
+                {r.details && <div style={{ fontSize: '12px', color: 'var(--color-text-muted)', fontStyle: 'italic' }}>{r.details}</div>}
+              </div>
+            ))}
+          </div>
         )}
       </div>
-    </div>
-  )
+    )
+  }
 
   return (
     <div>
       <div style={{ fontSize: '12px', color: 'var(--color-text-muted)', marginBottom: '16px' }}>
-        {pending.length} pendiente{pending.length !== 1 ? 's' : ''} · {reviewed.length} revisado{reviewed.length !== 1 ? 's' : ''} ·{' '}
+        {pendingGroups.length} usuario{pendingGroups.length !== 1 ? 's' : ''} pendiente{pendingGroups.length !== 1 ? 's' : ''} · {reviewedGroups.length} revisado{reviewedGroups.length !== 1 ? 's' : ''} ·{' '}
         <button onClick={fetchReports} style={{ background: 'none', border: 'none', color: 'var(--color-primary)', cursor: 'pointer', fontSize: '12px', fontFamily: 'var(--font-sans)', padding: 0 }}>Actualizar</button>
       </div>
-      {pending.map(r => <ReportRow key={r.id} r={r} />)}
-      {reviewed.length > 0 && pending.length > 0 && (
+      {pendingGroups.map(g => <GroupCard key={g.key} g={g} />)}
+      {reviewedGroups.length > 0 && pendingGroups.length > 0 && (
         <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '1px', margin: '16px 0 10px' }}>Revisados</div>
       )}
-      {reviewed.map(r => <ReportRow key={r.id} r={r} />)}
+      {reviewedGroups.map(g => <GroupCard key={g.key} g={g} />)}
+    </div>
+  )
+}
+
+// Llista d'IDs admin per excloure'ls dels recomptes (no són usuaris "reals").
+const ADMIN_ID_LIST = [...ADMIN_USER_IDS]
+const NOT_ADMIN_IN = `(${ADMIN_ID_LIST.join(',')})`
+
+const startOfDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate())
+
+// Targeta KPI reutilitzable de l'analítica.
+function Kpi({ label, value, color, hint }) {
+  return (
+    <div style={{ background: 'var(--color-bg)', border: '0.5px solid var(--color-border)', borderRadius: 'var(--radius-lg)', padding: '16px 18px' }}>
+      <div style={{ fontSize: '10px', color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '8px' }}>{label}</div>
+      <div style={{ fontSize: '26px', fontWeight: 800, lineHeight: 1, color: color || 'var(--color-text)' }}>{value}</div>
+      {hint && <div style={{ fontSize: '11px', color: 'var(--color-text-muted)', marginTop: '6px' }}>{hint}</div>}
+    </div>
+  )
+}
+
+// Mini gràfic de barres dels últims 14 dies (sense llibreries externes).
+function MiniBars({ title, days, color }) {
+  const max = Math.max(1, ...days.map(d => d.count))
+  return (
+    <div style={{ background: 'var(--color-bg)', border: '0.5px solid var(--color-border)', borderRadius: 'var(--radius-lg)', padding: '18px' }}>
+      <div style={{ fontSize: '13px', fontWeight: 700, marginBottom: '14px' }}>{title}</div>
+      <div style={{ display: 'flex', alignItems: 'flex-end', gap: '4px', height: '110px' }}>
+        {days.map((d, i) => (
+          <div key={i} title={`${d.label}: ${d.count}`}
+            style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end', height: '100%', gap: '4px' }}>
+            <span style={{ fontSize: '10px', color: 'var(--color-text-muted)', fontWeight: 600 }}>{d.count > 0 ? d.count : ''}</span>
+            <div style={{ width: '100%', height: `${(d.count / max) * 100}%`, minHeight: d.count > 0 ? '3px' : '0', background: color || 'var(--color-primary)', borderRadius: '3px 3px 0 0', transition: 'height 0.3s' }} />
+            <span style={{ fontSize: '9px', color: 'var(--color-text-muted)' }}>{d.label}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+const toDateInput = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+
+function AnalyticsTab() {
+  // Rang de dates seleccionable. Per defecte, els últims 7 dies.
+  const [from, setFrom] = useState(() => toDateInput(new Date(Date.now() - 6 * 86400000)))
+  const [to, setTo] = useState(() => toDateInput(new Date()))
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [presenceErr, setPresenceErr] = useState(false)
+
+  const fetchAnalytics = async () => {
+    setLoading(true)
+    const safetyTimer = setTimeout(() => setLoading(false), 12000)
+    try {
+      const now = new Date()
+      const startToday = startOfDay(now).toISOString()
+      const startYesterday = startOfDay(new Date(now - 86400000)).toISOString()
+      const active5 = new Date(now - 5 * 60000).toISOString()
+
+      // Rang triat: del dia "desde" 00:00 fins al final del dia "hasta" (exclusiu el dia següent).
+      const rStart = startOfDay(new Date(from + 'T00:00:00'))
+      const rEnd = startOfDay(new Date(to + 'T00:00:00')); rEnd.setDate(rEnd.getDate() + 1)
+      const rangeStart = rStart.toISOString()
+      const rangeEnd = rEnd.toISOString()
+
+      // Recompte ràpid (head:true → no baixa files). build() afegeix filtres.
+      const count = async (table, build) => {
+        let q = supabase.from(table).select('id', { count: 'exact', head: true })
+        if (build) q = build(q)
+        const { count: c, error } = await q
+        return error ? null : (c || 0)
+      }
+
+      const [
+        usersTotal, usersToday, usersYesterday, usersRange,
+        betsTotal, betsToday, betsRange, channels,
+      ] = await Promise.all([
+        count('profiles', q => q.not('id', 'in', NOT_ADMIN_IN)),
+        count('profiles', q => q.not('id', 'in', NOT_ADMIN_IN).gte('created_at', startToday)),
+        count('profiles', q => q.not('id', 'in', NOT_ADMIN_IN).gte('created_at', startYesterday).lt('created_at', startToday)),
+        count('profiles', q => q.not('id', 'in', NOT_ADMIN_IN).gte('created_at', rangeStart).lt('created_at', rangeEnd)),
+        count('bets'),
+        count('bets', q => q.gte('created_at', startToday)),
+        count('bets', q => q.gte('created_at', rangeStart).lt('created_at', rangeEnd)),
+        count('channels', q => q.is('deleted_at', null)),
+      ])
+
+      // Presència (last_seen) — pot no existir encara la columna; ho gestionem a part.
+      let activeNow = null, activeToday = null, activeYesterday = null, activeRange = null
+      try {
+        const presence = await Promise.all([
+          count('profiles', q => q.not('id', 'in', NOT_ADMIN_IN).gte('last_seen', active5)),
+          count('profiles', q => q.not('id', 'in', NOT_ADMIN_IN).gte('last_seen', startToday)),
+          count('profiles', q => q.not('id', 'in', NOT_ADMIN_IN).gte('last_seen', startYesterday).lt('last_seen', startToday)),
+          count('profiles', q => q.not('id', 'in', NOT_ADMIN_IN).gte('last_seen', rangeStart).lt('last_seen', rangeEnd)),
+        ])
+        if (presence.some(v => v === null)) setPresenceErr(true)
+        ;[activeNow, activeToday, activeYesterday, activeRange] = presence
+      } catch {
+        setPresenceErr(true)
+      }
+
+      // Sèries diàries del rang triat per a registres i apostes.
+      const buildSeries = (rows) => {
+        const buckets = []
+        for (let d = new Date(rStart); d < rEnd; d.setDate(d.getDate() + 1)) {
+          const day = startOfDay(new Date(d))
+          buckets.push({ ts: day.getTime(), label: String(day.getDate()), count: 0 })
+        }
+        for (const r of rows || []) {
+          const t = startOfDay(new Date(r.created_at)).getTime()
+          const b = buckets.find(x => x.ts === t)
+          if (b) b.count++
+        }
+        return buckets
+      }
+      const [{ data: regRows }, { data: betRows }] = await Promise.all([
+        supabase.from('profiles').select('created_at').gte('created_at', rangeStart).lt('created_at', rangeEnd).not('id', 'in', NOT_ADMIN_IN).limit(10000),
+        supabase.from('bets').select('created_at').gte('created_at', rangeStart).lt('created_at', rangeEnd).limit(30000),
+      ])
+
+      setData({
+        usersTotal, usersToday, usersYesterday, usersRange,
+        activeNow, activeToday, activeYesterday, activeRange,
+        betsTotal, betsToday, betsRange, channels,
+        regSeries: buildSeries(regRows), betSeries: buildSeries(betRows),
+      })
+    } catch {
+      setData(null)
+    } finally {
+      clearTimeout(safetyTimer)
+      setLoading(false)
+    }
+  }
+
+  // Recarrega en canviar el rang.
+  useEffect(() => { fetchAnalytics() }, [from, to]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const fmt = (v) => v === null || v === undefined ? '—' : v.toLocaleString('es-ES')
+  const Section = ({ title }) => (
+    <div style={{ fontSize: '11px', fontWeight: 700, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '1px', margin: '20px 0 10px' }}>{title}</div>
+  )
+  const grid = { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '10px' }
+  const dateInput = { background: 'var(--color-bg-soft)', border: '0.5px solid var(--color-border)', color: 'var(--color-text)', fontFamily: 'var(--font-sans)', fontSize: '13px', padding: '7px 10px', borderRadius: 'var(--radius-md)', outline: 'none' }
+
+  // Presets ràpids: omplen el calendari (no són comptadors fixos).
+  const setRange = (days) => {
+    setFrom(toDateInput(new Date(Date.now() - (days - 1) * 86400000)))
+    setTo(toDateInput(new Date()))
+  }
+  const today = toDateInput(new Date())
+  const rangeDays = data?.regSeries?.length || 0
+  const rangeLabel = `Del ${new Date(from + 'T00:00:00').toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit' })} al ${new Date(to + 'T00:00:00').toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit' })} · ${rangeDays} día${rangeDays !== 1 ? 's' : ''}`
+
+  return (
+    <div>
+      {/* Selector de rang de dates */}
+      <div style={{ display: 'flex', alignItems: 'flex-end', gap: '10px', flexWrap: 'wrap', marginBottom: '8px' }}>
+        <div>
+          <label style={{ display: 'block', fontSize: '10px', fontWeight: 700, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: '4px' }}>Desde</label>
+          <input type="date" value={from} max={to || today} onChange={e => setFrom(e.target.value)} style={dateInput} />
+        </div>
+        <div>
+          <label style={{ display: 'block', fontSize: '10px', fontWeight: 700, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: '4px' }}>Hasta</label>
+          <input type="date" value={to} min={from} max={today} onChange={e => setTo(e.target.value)} style={dateInput} />
+        </div>
+        <div style={{ display: 'flex', gap: '6px' }}>
+          {[{ l: '7d', d: 7 }, { l: '30d', d: 30 }, { l: '90d', d: 90 }].map(p => (
+            <button key={p.l} onClick={() => setRange(p.d)}
+              style={{ padding: '7px 12px', borderRadius: 'var(--radius-md)', border: '0.5px solid var(--color-border)', background: 'var(--color-bg)', color: 'var(--color-text-muted)', cursor: 'pointer', fontSize: '12px', fontWeight: 600, fontFamily: 'var(--font-sans)' }}>
+              {p.l}
+            </button>
+          ))}
+        </div>
+        <button onClick={fetchAnalytics} style={{ background: 'none', border: 'none', color: 'var(--color-primary)', cursor: 'pointer', fontSize: '12px', fontFamily: 'var(--font-sans)', padding: '7px 0' }}>Actualizar</button>
+      </div>
+      <div style={{ fontSize: '12px', color: 'var(--color-text-muted)', marginBottom: '4px' }}>{rangeLabel}</div>
+
+      {loading ? (
+        <div style={{ textAlign: 'center', padding: '40px', color: 'var(--color-text-muted)' }}>⏳ Cargando analíticas...</div>
+      ) : !data ? (
+        <div style={{ textAlign: 'center', padding: '40px', color: 'var(--color-text-muted)' }}>No se pudieron cargar las analíticas.</div>
+      ) : (
+        <>
+          <Section title="👥 Usuarios" />
+          <div style={grid}>
+            <Kpi label="Total registrados" value={fmt(data.usersTotal)} color="var(--color-primary)" hint="Histórico" />
+            <Kpi label="Nuevos hoy" value={fmt(data.usersToday)} />
+            <Kpi label="Nuevos ayer" value={fmt(data.usersYesterday)} />
+            <Kpi label="Nuevos en el rango" value={fmt(data.usersRange)} color="var(--color-primary)" hint={rangeLabel} />
+          </div>
+
+          <Section title="🟢 Actividad" />
+          {presenceErr && (
+            <div style={{ fontSize: '12px', color: 'var(--color-warning, #f59e0b)', background: 'var(--color-bg-soft)', border: '0.5px solid var(--color-border)', borderRadius: 'var(--radius-md)', padding: '10px 14px', marginBottom: '10px', lineHeight: 1.5 }}>
+              ⚠️ Falta la columna <strong>last_seen</strong> en la tabla profiles. Ejecuta el SQL que te ha pasado el asistente en Supabase para empezar a registrar la actividad.
+            </div>
+          )}
+          <div style={grid}>
+            <Kpi label="Activos ahora" value={fmt(data.activeNow)} color="var(--color-primary)" hint="Últimos 5 min" />
+            <Kpi label="Activos hoy" value={fmt(data.activeToday)} />
+            <Kpi label="Activos ayer" value={fmt(data.activeYesterday)} />
+            <Kpi label="Activos en el rango" value={fmt(data.activeRange)} hint={rangeLabel} />
+          </div>
+
+          <Section title="📊 Contenido y actividad" />
+          <div style={grid}>
+            <Kpi label="Total apuestas" value={fmt(data.betsTotal)} color="var(--color-primary)" hint="Histórico" />
+            <Kpi label="Apuestas hoy" value={fmt(data.betsToday)} />
+            <Kpi label="Apuestas en el rango" value={fmt(data.betsRange)} color="var(--color-primary)" hint={rangeLabel} />
+            <Kpi label="Canales activos" value={fmt(data.channels)} />
+          </div>
+
+          <Section title="📈 Evolución diaria (rango)" />
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '10px' }}>
+            <MiniBars title="Nuevos registros / día" days={data.regSeries} color="var(--color-primary)" />
+            <MiniBars title="Apuestas / día" days={data.betSeries} color="var(--color-warning, #f59e0b)" />
+          </div>
+        </>
+      )}
     </div>
   )
 }
@@ -650,6 +928,7 @@ export default function AdminPanel({ user }) {
       {/* Pestanyes del panell */}
       <div style={{ display: 'flex', gap: '4px', borderBottom: '0.5px solid var(--color-border)', marginBottom: '20px' }}>
         {[
+          { id: 'analiticas',   label: '📊 Analíticas' },
           { id: 'review',       label: `🚩 Picks en revisión${reviewBets.length > 0 ? ` (${reviewBets.length})` : ''}` },
           { id: 'problemas',    label: `🆘 Problemas${pendingTicketsCount > 0 ? ` (${pendingTicketsCount})` : ''}` },
           { id: 'sugerencias',  label: `💬 Sugerencias${suggestionsCount > 0 ? ` (${suggestionsCount})` : ''}` },
@@ -663,6 +942,7 @@ export default function AdminPanel({ user }) {
         ))}
       </div>
 
+      {activeTab === 'analiticas'  && <AnalyticsTab />}
       {activeTab === 'problemas'   && <ProblemasTab />}
       {activeTab === 'sugerencias' && <SugerenciasTab adminUserId={user?.id} />}
       {activeTab === 'verificados' && <VerificadosTab />}
